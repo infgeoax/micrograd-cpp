@@ -3,4 +3,5 @@ project(mininn)
 
 set(CMAKE_CXX_STANDARD 23)
 
-add_executable(mininn main.cpp)
+add_executable(mininn main.cpp
+        engine.h)

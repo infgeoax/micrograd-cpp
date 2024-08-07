@@ -1,7 +1,9 @@
+#include <algorithm>
 #include <functional>
 #include <iostream>
 #include <memory>
 #include <ranges>
+#include <random>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -11,6 +13,9 @@
 using DataType = double;
 using BackwardFunc = std::function<void()>;
 
+/**
+ * Represents a value data object that can be referenced via shared_ptr.
+ */
 class ValueData {
 public:
     using Pointer = std::shared_ptr<ValueData>;
@@ -99,6 +104,7 @@ public:
     Dot(ValueData *root) {
         _buildGraph(root);
     }
+
 private:
     void _buildGraph(ValueData *root) {
         if (!_visited.contains(root)) {
@@ -110,7 +116,7 @@ private:
                 auto opId = _opNodeId(root);
                 _nodes.insert(std::make_pair(opId, _getOpNodeAttrs(root)));
                 _edges.push_back(std::make_tuple(opId, nodeId));
-                for (auto &p : root->prev()) {
+                for (auto &p: root->prev()) {
                     _edges.push_back(std::make_tuple(_valueNodeId(p.get()), opId));
                     _buildGraph(p.get());
                 }
@@ -122,7 +128,7 @@ private:
         std::ostringstream oss;
         oss << "shape=rectangle,";
         oss << "label=\"";
-        if (!vd->label().empty()) {oss << vd->label() << "|";}
+        if (!vd->label().empty()) { oss << vd->label() << "|"; }
         oss << "val=" << vd->data() << ", grad=" << vd->grad() << "\"";
         return oss.str();
     }
@@ -150,16 +156,17 @@ private:
     // edges (node id 1 -> node id 2)
     std::vector<std::tuple<std::string, std::string>> _edges;
 
-    std::unordered_set<ValueData*> _visited;
-    friend std::ostream& operator << (std::ostream &out, const Dot &dot);
+    std::unordered_set<ValueData *> _visited;
+
+    friend std::ostream &operator<<(std::ostream &out, const Dot &dot);
 };
 
-std::ostream &operator << (std::ostream &out, const Dot &dot) {
+std::ostream &operator<<(std::ostream &out, const Dot &dot) {
     out << "digraph G {\n";
-    for (auto &vn : dot._nodes) {
+    for (auto &vn: dot._nodes) {
         out << vn.first << "[" << vn.second << "];\n";
     }
-    for (auto &edge : dot._edges) {
+    for (auto &edge: dot._edges) {
         out << std::get<0>(edge) << " -> " << std::get<1>(edge) << ";\n";
     }
     out << "}\n";
@@ -178,7 +185,7 @@ public:
     Value(DataType data, const std::string &op, const std::vector<ValueDataPtr> &prev) : _valueData(
             std::make_shared<ValueData>(data, op, prev, "")) {}
 
-    Value(const Value &other) = default;
+    Value(const Value &other) : _valueData(other._valueData) {}
 
     ValueData *operator->() const {
         return _valueData.get();
@@ -211,6 +218,16 @@ public:
         return x;
     }
 
+    Value pow(DataType a) const {
+        auto x = Value(std::pow(_valueData->data(), a), "power", {pointer()});
+        const Value &lh = *this;
+        x << [=] {
+            lh->grad() += x->grad() * a * std::pow(lh->data(), a - 1);
+        };
+
+        return x;
+    }
+
     Value relu() {
         auto x = Value(std::max(0.0, _valueData->data()), "relu", {pointer()});
 
@@ -218,6 +235,14 @@ public:
             _valueData->grad() += x->grad() * (x->data() > 0 ? 1 : 0);
         };
 
+        return x;
+    }
+
+    Value tanh() {
+        auto x = Value(std::tanh(_valueData->data()), "tanh", {pointer()});
+        x << [=, this] {
+            _valueData->grad() += x->grad() * (1 - x->data() * x->data());
+        };
         return x;
     }
 
@@ -238,22 +263,8 @@ private:
     ValueDataPtr _valueData;
 };
 
-/// lh to the power of rh.
-/// \param lh
-/// \param rh
-/// \return
-Value operator^(const Value &lh, DataType rh) {
-    std::ostringstream oss;
-    oss << "pow(" << rh << ")";
-    auto x = Value(std::pow(lh->data(), rh), oss.str(), {lh.pointer()});
-    x << [=] {
-        lh->grad() += x->grad() * rh * std::pow(lh->data(), rh - 1);
-    };
-    return x;
-}
-
 Value &operator^=(Value &lh, DataType rh) {
-    lh = lh ^ rh;
+    lh = lh.pow(rh);
     return lh;
 }
 
@@ -336,7 +347,7 @@ Value &operator*=(Value &lh, const RH &rh) {
 }
 
 Value operator/(const Value &lh, const Value &rh) {
-    return lh * (rh ^ -1);
+    return lh * rh.pow(-1);
 }
 
 Value operator/(const Value &lh, DataType rh) {
@@ -353,28 +364,132 @@ Value &operator/=(Value &lh, RH rh) {
     return lh;
 }
 
+std::ostream &operator<<(std::ostream &out, const Value &val) {
+    out << "value=" << val->data() << ", grad=" << val->grad() << ";";
+    if (!val->label().empty()) {
+        out << " | " << val->label();
+    }
+    return out;
+}
+
+/// Generate uniform random value in range [left, right]
+/// \param left
+/// \param right
+/// \return
+DataType uniform(DataType left, DataType right) {
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    std::uniform_real_distribution<> dis(left, right);
+    return dis(gen);
+}
+
+
+/**
+ * A neuron has n inputs and one output.
+ */
+class Neuron {
+public:
+    explicit Neuron(int nIn) : _w(nIn), _b(uniform(-1, 1)) {
+        for (int i = 0; i < nIn; ++i) {
+            _w[i] = Value(uniform(-1, 1));
+        }
+    }
+
+    Value operator()(const std::vector<Value> &x) {
+        // w * x + b
+        Value r = _b;
+        for (int i = 0; i < x.size(); ++i) {
+            r += x[i] * _w[i];
+        }
+        return r.tanh();
+    }
+
+private:
+    std::vector<Value> _w;
+    Value _b;
+};
+
+class Layer {
+public:
+    Layer(int nIn, int nOut) {
+        for (int i = 0; i < nOut; ++i) {
+            _neurons.emplace_back(nIn);
+        }
+    }
+
+    std::vector<Value> operator()(const std::vector<Value> &x) {
+        std::vector<Value> out;
+        out.reserve(_neurons.size());
+        for (auto &_neuron: _neurons) {
+            out.emplace_back(_neuron(x));
+        }
+        return out;
+    }
+
+private:
+    std::vector<Neuron> _neurons;
+};
+
+class MLP {
+public:
+    MLP(int nIn, const std::vector<int> &nOuts) {
+        std::vector<int> sz;
+        sz.reserve(1 + nOuts.size());
+        sz.push_back(nIn);
+        sz.insert(sz.end(), nOuts.begin(), nOuts.end());
+        for (int i = 0; i < nOuts.size(); ++i) {
+            _layers.emplace_back(sz[i], sz[i + 1]);
+        }
+    }
+
+    std::vector<Value> operator()(const std::vector<Value> &x) {
+        auto t = x;
+        for (auto &_layer: _layers) {
+            t = _layer(t);
+        }
+        return t;
+    }
+
+    std::vector<Value> operator()(const std::vector<DataType> &x) {
+        std::vector<Value> val;
+        val.reserve(x.size());
+        for (auto i: x) val.emplace_back(i);
+        return (*this)(val);
+    }
+
+private:
+    std::vector<Layer> _layers;
+};
+
 int main() {
-    auto t1 = Value(10);
-    auto t2 = Value(20);
-    auto t3 = 14 * t2 + 17 * t1 ^ 3;
-    t3.backward();
+    Neuron neuron(2);
+    std::vector<Value> x{
+        Value(1.0), Value(-1.0)
+    };
+    auto y = neuron(x);
+    y.backward();
+    std::cout << x[0]->grad() << "\n";
 
-    auto a = Value(-4.0) | "a";
-    auto b = Value(2.0) | "b";
-    auto c = (a + b) | "c1";
-    auto d = (a * b + (b ^ 3)) | "d";
-    c += (c + 1) | "c2";
-    c += (1 + c + (-a)) | "c3";
-    d += (d * 2 + (b + a).relu()) | "d2";
-    d += (3 * d + (b - a).relu()) | "d3";
-    auto e = (c - d) | "e";
-    auto f = e ^ 2;
-    auto g = f / 2.0;
-    g += 10.0 / f;
-    g.backward();
+    MLP mlp(3, {4, 4, 1});
+    std::vector<std::vector<Value>> xs = {
+            {Value(2.0), Value(3.0), Value(-1.0)},
+            {Value(3.0), Value(-1.0), Value(0.5)},
+            {Value(0.5), Value(1.0), Value(1.0)},
+            {Value(1.0), Value(1.0), Value(-1.0)},
+    };
+    std::vector<Value> ys = {
+            Value(1.0), Value(-1.0), Value(-1.0), Value(1.0)
+    };
+    std::vector<Value> ypreds;
+    for (auto x : xs) {
+        ypreds.push_back(mlp(x)[0]);
+    }
 
-    Dot dot1(g.raw_pointer());
-    std::cout << dot1 << "\n";
+    auto loss = Value(0);
+    for (int i = 0; i < xs.size(); ++i) {
+        loss += (ypreds[i] - ys[i]).pow(2);
+    }
+    loss.backward();
 
     return 0;
 }
