@@ -1,4 +1,3 @@
-#include <algorithm>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -10,8 +9,13 @@
 #include <vector>
 #include <sstream>
 
+/// Type of data in each node: double
 using DataType = double;
+/// Backward function signature;
 using BackwardFunc = std::function<void()>;
+
+/// Default backward function: does nothing.
+void empty_backward() {}
 
 /**
  * Represents a value data object that can be referenced via shared_ptr.
@@ -26,45 +30,47 @@ public:
 
     ValueData(DataType data, std::string op, std::vector<Pointer> prev, std::string label)
             : _data(data), _grad(0.0), _op(std::move(op)), _prev(std::move(prev)), _label(std::move(label)),
-              _backwardFunctions() {}
+              _backwardFunction(empty_backward) {}
 
-    [[nodiscard]] DataType data() const {
+    /// Referece to the current value, can be used to update.
+    DataType &data() {
         return _data;
     }
 
-    [[nodiscard]] const std::vector<Pointer> &prev() const {
-        return _prev;
-    }
-
-    [[nodiscard]] DataType grad() const {
-        return _grad;
-    }
-
-    [[nodiscard]] std::string op() const {
-        return _op;
-    }
-
-    [[nodiscard]] std::string label() const {
-        return _label;
-    }
-
+    /// Reference to the current grad, can be used to update.
     DataType &grad() {
         return _grad;
     }
 
+    /// Reference to parents, could be empty if the value is created from scratch.
+    const std::vector<Pointer> &prev() const {
+        return _prev;
+    }
+
+    /// Operation used to generate the value from its parents.
+    std::string op() const {
+        return _op;
+    }
+
+    /// Optional label on the value.
+    std::string label() const {
+        return _label;
+    }
+
+    /// Update label
     void label(std::string label) {
         _label = std::move(label);
     }
 
+    /// Update backward function
     ValueData &operator<<(BackwardFunc backward) {
-        _backwardFunctions.emplace_back(std::move(backward));
+        _backwardFunction = std::move(backward);
         return *this;
     }
 
+    /// Call backward function on the current node.
     void backward() {
-        for (const auto &backward_func: _backwardFunctions) {
-            backward_func();
-        }
+        _backwardFunction();
     }
 
 private:
@@ -73,15 +79,21 @@ private:
     std::string _op;
     std::vector<Pointer> _prev;
     std::string _label;
-    std::vector<BackwardFunc> _backwardFunctions;
+    BackwardFunc _backwardFunction;
 };
 
+/// Alias for value data pointer type.
 using ValueDataPtr = ValueData::Pointer;
 
+/// Topological sort an expression graph, used to determine the order in which to run backward functions.
 class Topo : public std::vector<ValueData *> {
 public:
     explicit Topo(ValueData *root) {
         dfs(root);
+    }
+
+    auto order() {
+        return std::ranges::reverse_view(*this);
     }
 
 private:
@@ -99,9 +111,105 @@ private:
 };
 
 
+/// A value is just a holder of a shared pointer to ValueData
+/// Calculations are done on Value, this enables us to build an expression tree from C++ expression.
+class Value {
+public:
+    Value() : Value(0) {}
+
+    explicit Value(DataType data, const std::string &label = "") : _valueData(std::make_shared<ValueData>(data)) {
+        _valueData->label(label);
+    }
+
+    Value(DataType data, const std::string &op, const std::vector<ValueDataPtr> &prev) : _valueData(
+            std::make_shared<ValueData>(data, op, prev, "")) {}
+
+    Value(const Value &other) = default;
+
+    ValueData *operator->() const {
+        return _valueData.get();
+    }
+
+    ValueDataPtr pointer() {
+        return _valueData;
+    }
+
+    Value &operator<<(BackwardFunc backward) {
+        *_valueData << std::move(backward);
+        return *this;
+    }
+
+    [[nodiscard]] const ValueDataPtr &pointer() const {
+        return _valueData;
+    }
+
+    [[nodiscard]] ValueData *raw_pointer() const {
+        return _valueData.get();
+    }
+
+    Value exp() {
+        auto x = Value(std::exp(_valueData->data()), "exp", {pointer()});
+        auto valueData = _valueData;
+        x << [=] {
+            valueData->grad() += x->grad() * x->data();
+        };
+
+        return x;
+    }
+
+    Value pow(DataType a) const {
+        auto x = Value(std::pow(_valueData->data(), a), "power", {pointer()});
+        auto lh = _valueData;
+        x << [=] {
+            lh->grad() += x->grad() * a * std::pow(lh->data(), a - 1);
+        };
+
+        return x;
+    }
+
+    Value relu() {
+        auto x = Value(std::max(0.0, _valueData->data()), "relu", {pointer()});
+        auto valueData = _valueData;
+        x << [=, this] {
+            valueData->grad() += x->grad() * (x->data() > 0 ? 1 : 0);
+        };
+
+        return x;
+    }
+
+    Value tanh() {
+        auto x = Value(std::tanh(_valueData->data()), "tanh", {pointer()});
+        auto valueData = _valueData;
+        x << [=] {
+            valueData->grad() += x->grad() * (1 - x->data() * x->data());
+        };
+        return x;
+    }
+
+    Value &operator|(const std::string &label) {
+        _valueData->label(label);
+        return *this;
+    }
+
+    /// The actual backward function:
+    /// - Grad on the current node is always 1: as it's just identity function: y = x
+    /// - Then we update grads in topological order
+    void backward() {
+        _valueData->grad() = 1;
+        Topo topo(raw_pointer());
+        for (auto p: topo.order()) {
+            p->backward();
+        }
+    }
+
+private:
+    ValueDataPtr _valueData;
+};
+
+/// Util to visualize a expression graph.
 class Dot {
 public:
-    Dot(ValueData *root) {
+    explicit Dot(ValueData *root) {
         _buildGraph(root);
     }
 
@@ -159,108 +267,6 @@ private:
     std::unordered_set<ValueData *> _visited;
 
     friend std::ostream &operator<<(std::ostream &out, const Dot &dot);
-};
-
-std::ostream &operator<<(std::ostream &out, const Dot &dot) {
-    out << "digraph G {\n";
-    for (auto &vn: dot._nodes) {
-        out << vn.first << "[" << vn.second << "];\n";
-    }
-    for (auto &edge: dot._edges) {
-        out << std::get<0>(edge) << " -> " << std::get<1>(edge) << ";\n";
-    }
-    out << "}\n";
-    return out;
-}
-
-
-class Value {
-public:
-    Value() : Value(0) {}
-
-    explicit Value(DataType data, const std::string &label = "") : _valueData(std::make_shared<ValueData>(data)) {
-        _valueData->label(label);
-    }
-
-    Value(DataType data, const std::string &op, const std::vector<ValueDataPtr> &prev) : _valueData(
-            std::make_shared<ValueData>(data, op, prev, "")) {}
-
-    Value(const Value &other) : _valueData(other._valueData) {}
-
-    ValueData *operator->() const {
-        return _valueData.get();
-    }
-
-    ValueDataPtr pointer() {
-        return _valueData;
-    }
-
-    Value &operator<<(BackwardFunc backward) {
-        *_valueData << std::move(backward);
-        return *this;
-    }
-
-    [[nodiscard]] const ValueDataPtr &pointer() const {
-        return _valueData;
-    }
-
-    [[nodiscard]] ValueData *raw_pointer() const {
-        return _valueData.get();
-    }
-
-    Value exp() {
-        auto x = Value(std::exp(_valueData->data()), "exp", {pointer()});
-
-        x << [=, this] {
-            _valueData->grad() += x->grad() * x->data();
-        };
-
-        return x;
-    }
-
-    Value pow(DataType a) const {
-        auto x = Value(std::pow(_valueData->data(), a), "power", {pointer()});
-        const Value &lh = *this;
-        x << [=] {
-            lh->grad() += x->grad() * a * std::pow(lh->data(), a - 1);
-        };
-
-        return x;
-    }
-
-    Value relu() {
-        auto x = Value(std::max(0.0, _valueData->data()), "relu", {pointer()});
-
-        x << [=, this] {
-            _valueData->grad() += x->grad() * (x->data() > 0 ? 1 : 0);
-        };
-
-        return x;
-    }
-
-    Value tanh() {
-        auto x = Value(std::tanh(_valueData->data()), "tanh", {pointer()});
-        x << [=, this] {
-            _valueData->grad() += x->grad() * (1 - x->data() * x->data());
-        };
-        return x;
-    }
-
-    Value &operator|(const std::string &label) {
-        _valueData->label(label);
-        return *this;
-    }
-
-    void backward() {
-        _valueData->grad() = 1;
-        Topo topo(raw_pointer());
-        for (auto &p: std::ranges::reverse_view(topo)) {
-            p->backward();
-        }
-    }
-
-private:
-    ValueDataPtr _valueData;
 };
 
 Value &operator^=(Value &lh, DataType rh) {
@@ -365,10 +371,7 @@ Value &operator/=(Value &lh, RH rh) {
 }
 
 std::ostream &operator<<(std::ostream &out, const Value &val) {
-    out << "value=" << val->data() << ", grad=" << val->grad() << ";";
-    if (!val->label().empty()) {
-        out << " | " << val->label();
-    }
+    out << "Value(data=" << val->data() << ")";
     return out;
 }
 
@@ -401,7 +404,14 @@ public:
         for (int i = 0; i < x.size(); ++i) {
             r += x[i] * _w[i];
         }
+        //r = r.tanh();
         return r.tanh();
+    }
+
+    std::vector<Value> parameters() {
+        std::vector<Value> ret(_w);
+        ret.push_back(_b);
+        return ret;
     }
 
 private:
@@ -424,6 +434,14 @@ public:
             out.emplace_back(_neuron(x));
         }
         return out;
+    }
+
+    std::vector<Value> parameters() {
+        std::vector<Value> ret;
+        for (auto &n: _neurons) {
+            ret.append_range(n.parameters());
+        }
+        return ret;
     }
 
 private:
@@ -450,46 +468,78 @@ public:
         return t;
     }
 
-    std::vector<Value> operator()(const std::vector<DataType> &x) {
-        std::vector<Value> val;
-        val.reserve(x.size());
-        for (auto i: x) val.emplace_back(i);
-        return (*this)(val);
+    std::vector<Value> parameters() {
+        std::vector<Value> ret;
+        for (auto &l: _layers) {
+            ret.append_range(l.parameters());
+        }
+        return ret;
     }
 
 private:
     std::vector<Layer> _layers;
 };
 
-int main() {
-    Neuron neuron(2);
-    std::vector<Value> x{
-        Value(1.0), Value(-1.0)
-    };
-    auto y = neuron(x);
-    y.backward();
-    std::cout << x[0]->grad() << "\n";
+template<typename Val>
+std::ostream &operator<<(std::ostream &out, const std::vector<Val> &vec) {
+    out << "[";
+    bool first = true;
+    for (auto &val: vec) {
+        if (!first) out << ", "; else first = false;
+        out << val;
+    }
+    out << "]";
+    return out;
+}
 
-    MLP mlp(3, {4, 4, 1});
+
+/// Write DOT to an output stream, in a format that can be used by tools to generate a visualization.
+std::ostream &operator<<(std::ostream &out, const Dot &dot) {
+    out << "digraph G {\n";
+    for (auto &vn: dot._nodes) {
+        out << vn.first << "[" << vn.second << "];\n";
+    }
+    for (auto &edge: dot._edges) {
+        out << std::get<0>(edge) << " -> " << std::get<1>(edge) << ";\n";
+    }
+    out << "}\n";
+    return out;
+}
+
+int main() {
+    Value a(0.1);
+    a.backward();
     std::vector<std::vector<Value>> xs = {
-            {Value(2.0), Value(3.0), Value(-1.0)},
+            {Value(2.0), Value(3.0),  Value(-1.0)},
             {Value(3.0), Value(-1.0), Value(0.5)},
-            {Value(0.5), Value(1.0), Value(1.0)},
-            {Value(1.0), Value(1.0), Value(-1.0)},
+            {Value(0.5), Value(1.0),  Value(1.0)},
+            {Value(1.0), Value(1.0),  Value(-1.0)},
     };
     std::vector<Value> ys = {
             Value(1.0), Value(-1.0), Value(-1.0), Value(1.0)
     };
-    std::vector<Value> ypreds;
-    for (auto x : xs) {
-        ypreds.push_back(mlp(x)[0]);
-    }
 
-    auto loss = Value(0);
-    for (int i = 0; i < xs.size(); ++i) {
-        loss += (ypreds[i] - ys[i]).pow(2);
+    MLP mlp(3, {4, 4, 1});
+    for (int i = 0; i < 120; ++i) {
+        std::vector<Value> ypreds;
+        for (auto &x: xs) {
+            ypreds.push_back(mlp(x)[0]);
+        }
+
+        auto loss = Value(0);
+        for (int j = 0; j < xs.size(); ++j) {
+            loss += (ypreds[j] - ys[j]).pow(2);
+        }
+        std::cout << "Preds: " << ypreds << "\n";
+        std::cout << "Loss: " << loss->data() << "\n";
+        loss.backward();
+
+        auto parameters = mlp.parameters();
+        for (auto &p: parameters) {
+            p->data() += -0.01 * p->grad();
+            p->grad() = 0;
+        }
     }
-    loss.backward();
 
     return 0;
 }
