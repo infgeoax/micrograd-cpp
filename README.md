@@ -55,3 +55,9 @@ Loss: 0.0487563
 Preds: [Value(data=0.914085), Value(data=-0.853472), Value(data=-0.907951), Value(data=0.895574)]
 Loss: 0.0482298
 ```
+
+## Replicating the demo
+
+![demo data](./demo.png)
+
+![decision boundary](./decision-boundary.png)

@@ -93,13 +93,13 @@ public:
 
     Value &operator<<(BackwardFunc backward);
 
-    const ValueDataPtr &pointer() const;
+    [[nodiscard]] const ValueDataPtr &pointer() const;
 
-    ValueData *raw_pointer() const;
+    [[nodiscard]] ValueData *raw_pointer() const;
 
     Value exp();
 
-    Value pow(DataType a) const;
+    [[nodiscard]] Value pow(DataType a) const;
 
     Value relu();
 
@@ -115,6 +115,9 @@ public:
 private:
     ValueDataPtr _valueData;
 };
+
+using Vector = std::vector<Value>;
+using Vector2D = std::vector<Vector>;
 
 Value &operator^=(Value &lh, DataType rh);
 
